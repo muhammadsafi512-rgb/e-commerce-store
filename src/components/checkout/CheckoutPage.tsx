@@ -25,6 +25,10 @@ import { AddressItem } from '@/components/addresses/AddressItem'
 import { FormItem } from '@/components/forms/FormItem'
 import { toast } from 'sonner'
 import { LoadingSpinner } from '@/components/LoadingSpinner'
+import { Product, Variant } from '@/payload-types'
+
+type GalleryItem = NonNullable<Product['gallery']>[number]
+type VariantOptionRef = NonNullable<Variant['options']>[number]
 
 const apiKey = `${process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY}`
 const stripe = loadStripe(apiKey)
@@ -373,14 +377,14 @@ export const CheckoutPage: React.FC = () => {
               if (isVariant) {
                 price = variant?.priceInUSD
 
-                const imageVariant = product.gallery?.find((item) => {
+                const imageVariant = product.gallery?.find((item: GalleryItem) => {
                   if (!item.variantOption) return false
                   const variantOptionID =
                     typeof item.variantOption === 'object'
                       ? item.variantOption.id
                       : item.variantOption
 
-                  const hasMatch = variant?.options?.some((option) => {
+                  const hasMatch = variant?.options?.some((option: VariantOptionRef) => {
                     if (typeof option === 'object') return option.id === variantOptionID
                     else return option === variantOptionID
                   })
@@ -408,7 +412,7 @@ export const CheckoutPage: React.FC = () => {
                       {variant && typeof variant === 'object' && (
                         <p className="text-sm font-mono text-primary/50 tracking-widest">
                           {variant.options
-                            ?.map((option) => {
+                            ?.map((option: VariantOptionRef) => {
                               if (typeof option === 'object') return option.label
                               return null
                             })
