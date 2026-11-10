@@ -882,6 +882,10 @@ export interface Variant {
   inventory?: number | null;
   priceInUSDEnabled?: boolean | null;
   priceInUSD?: number | null;
+  /**
+   * Optional. Unique per variant. Saved in uppercase.
+   */
+  sku?: string | null;
   updatedAt: string;
   createdAt: string;
   deletedAt?: string | null;
@@ -1563,6 +1567,7 @@ export interface VariantsSelect<T extends boolean = true> {
   inventory?: T;
   priceInUSDEnabled?: T;
   priceInUSD?: T;
+  sku?: T;
   updatedAt?: T;
   createdAt?: T;
   deletedAt?: T;
