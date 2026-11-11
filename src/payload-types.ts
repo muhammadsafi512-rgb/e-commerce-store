@@ -234,6 +234,22 @@ export interface Order {
         product?: (number | null) | Product;
         variant?: (number | null) | Variant;
         quantity: number;
+        /**
+         * The price of a single unit of this item, in cents. Written by the server when the order is created.
+         */
+        unitPrice?: number | null;
+        /**
+         * The title of the product at the time of purchase. Written by the server when the order is created.
+         */
+        productTitle?: string | null;
+        /**
+         * The title of the variant at the time of purchase. Written by the server when the order is created.
+         */
+        variantTitle?: string | null;
+        /**
+         * The SKU of the variant at the time of purchase. If it had any.
+         */
+        sku?: string | null;
         id?: string | null;
       }[]
     | null;
@@ -1674,6 +1690,10 @@ export interface OrdersSelect<T extends boolean = true> {
         product?: T;
         variant?: T;
         quantity?: T;
+        unitPrice?: T;
+        productTitle?: T;
+        variantTitle?: T;
+        sku?: T;
         id?: T;
       };
   shippingAddress?:

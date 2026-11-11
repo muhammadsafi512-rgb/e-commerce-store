@@ -17,6 +17,9 @@ import { customerOnlyFieldAccess } from '@/access/customerOnlyFieldAccess'
 import { isAdmin } from '@/access/isAdmin'
 import { isDocumentOwner } from '@/access/isDocumentOwner'
 import { nobody } from '@/access/nobody'
+import { addSnapshotFields } from '@/collections/Orders/snapshotFields'
+import { snapshotOrderItems } from '@/collections/Orders/snapshotOrderItems'
+import { withCheckoutValidation } from '@/payments/withCheckoutValidation'
 
 const generateTitle: GenerateTitle<Product | Page> = ({ doc }) => {
   return doc?.title ? `${doc.title} | Payload Ecommerce Template` : 'Payload Ecommerce Template'
@@ -98,8 +101,13 @@ export const plugins: Plugin[] = [
           // Local API calls (seed, server code) still bypass access by default.
           delete: nobody,
         },
+        hooks: {
+          ...defaultCollection.hooks,
+          // Fills title/sku/unit price on each order line at creation. Never throws.
+          beforeChange: [...(defaultCollection.hooks?.beforeChange ?? []), snapshotOrderItems],
+        },
         fields: [
-          ...defaultCollection.fields,
+          ...addSnapshotFields(defaultCollection.fields),
           {
             name: 'accessToken',
             type: 'text',
@@ -125,11 +133,14 @@ export const plugins: Plugin[] = [
     },
     payments: {
       paymentMethods: [
-        stripeAdapter({
-          secretKey: process.env.STRIPE_SECRET_KEY!,
-          publishableKey: process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!,
-          webhookSecret: process.env.STRIPE_WEBHOOKS_SIGNING_SECRET!,
-        }),
+        // Validates stock, price and variants before a PaymentIntent is created (decisions #21, #22).
+        withCheckoutValidation(
+          stripeAdapter({
+            secretKey: process.env.STRIPE_SECRET_KEY!,
+            publishableKey: process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!,
+            webhookSecret: process.env.STRIPE_WEBHOOKS_SIGNING_SECRET!,
+          }),
+        ),
       ],
     },
     products: {
