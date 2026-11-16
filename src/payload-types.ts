@@ -272,6 +272,11 @@ export interface Order {
   status?: OrderStatus;
   amount?: number | null;
   currency?: 'USD' | null;
+  /**
+   * Set by the system when something needs a person, for example an oversold item. Untick once handled.
+   */
+  needsAttention?: boolean | null;
+  attentionReason?: string | null;
   accessToken?: string | null;
   updatedAt: string;
   createdAt: string;
@@ -1717,6 +1722,8 @@ export interface OrdersSelect<T extends boolean = true> {
   status?: T;
   amount?: T;
   currency?: T;
+  needsAttention?: T;
+  attentionReason?: T;
   accessToken?: T;
   updatedAt?: T;
   createdAt?: T;

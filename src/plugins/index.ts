@@ -19,6 +19,9 @@ import { isDocumentOwner } from '@/access/isDocumentOwner'
 import { nobody } from '@/access/nobody'
 import { addSnapshotFields } from '@/collections/Orders/snapshotFields'
 import { snapshotOrderItems } from '@/collections/Orders/snapshotOrderItems'
+import { attentionFields } from '@/collections/Orders/attentionFields'
+import { TransactionsCollection } from '@/collections/Transactions'
+import { stripeWebhooks } from '@/payments/stripeWebhooks'
 import { withCheckoutValidation } from '@/payments/withCheckoutValidation'
 
 const generateTitle: GenerateTitle<Product | Page> = ({ doc }) => {
@@ -106,8 +109,16 @@ export const plugins: Plugin[] = [
           // Fills title/sku/unit price on each order line at creation. Never throws.
           beforeChange: [...(defaultCollection.hooks?.beforeChange ?? []), snapshotOrderItems],
         },
+        admin: {
+          ...defaultCollection.admin,
+          // Show the oversold / needs-attention flag in the orders list.
+          defaultColumns: Array.from(
+            new Set([...(defaultCollection.admin?.defaultColumns ?? []), 'needsAttention']),
+          ),
+        },
         fields: [
           ...addSnapshotFields(defaultCollection.fields),
+          ...attentionFields,
           {
             name: 'accessToken',
             type: 'text',
@@ -139,9 +150,15 @@ export const plugins: Plugin[] = [
             secretKey: process.env.STRIPE_SECRET_KEY!,
             publishableKey: process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!,
             webhookSecret: process.env.STRIPE_WEBHOOKS_SIGNING_SECRET!,
+            // Creates the order when a customer pays but never reaches the confirm step (decision #37).
+            webhooks: stripeWebhooks,
           }),
         ),
       ],
+    },
+    transactions: {
+      // Adds the oversold-order flag hook (decision #35). Fields are not changed.
+      transactionsCollectionOverride: TransactionsCollection,
     },
     products: {
       productsCollectionOverride: ProductsCollection,
