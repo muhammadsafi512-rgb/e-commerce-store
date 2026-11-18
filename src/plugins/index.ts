@@ -20,6 +20,8 @@ import { nobody } from '@/access/nobody'
 import { addSnapshotFields } from '@/collections/Orders/snapshotFields'
 import { snapshotOrderItems } from '@/collections/Orders/snapshotOrderItems'
 import { attentionFields } from '@/collections/Orders/attentionFields'
+import { copyPricingToOrder } from '@/collections/Orders/copyPricingToOrder'
+import { orderPricingFields } from '@/collections/Orders/pricingFields'
 import { TransactionsCollection } from '@/collections/Transactions'
 import { stripeWebhooks } from '@/payments/stripeWebhooks'
 import { withCheckoutValidation } from '@/payments/withCheckoutValidation'
@@ -107,7 +109,12 @@ export const plugins: Plugin[] = [
         hooks: {
           ...defaultCollection.hooks,
           // Fills title/sku/unit price on each order line at creation. Never throws.
-          beforeChange: [...(defaultCollection.hooks?.beforeChange ?? []), snapshotOrderItems],
+          // Then copies the price breakdown from the transaction (decision #40). Never throws.
+          beforeChange: [
+            ...(defaultCollection.hooks?.beforeChange ?? []),
+            snapshotOrderItems,
+            copyPricingToOrder,
+          ],
         },
         admin: {
           ...defaultCollection.admin,
@@ -119,6 +126,7 @@ export const plugins: Plugin[] = [
         fields: [
           ...addSnapshotFields(defaultCollection.fields),
           ...attentionFields,
+          ...orderPricingFields,
           {
             name: 'accessToken',
             type: 'text',
@@ -157,7 +165,8 @@ export const plugins: Plugin[] = [
       ],
     },
     transactions: {
-      // Adds the oversold-order flag hook (decision #35). Fields are not changed.
+      // Adds the price breakdown fields and hook (#39), the oversold-order flag (#35) and the
+      // discount redemption counter (#40). 'items' is not changed.
       transactionsCollectionOverride: TransactionsCollection,
     },
     products: {

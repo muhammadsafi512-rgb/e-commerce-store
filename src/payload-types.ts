@@ -76,6 +76,7 @@ export interface Config {
     pages: Page;
     categories: Category;
     media: Media;
+    'discount-codes': DiscountCode;
     forms: Form;
     'form-submissions': FormSubmission;
     addresses: Address;
@@ -109,6 +110,7 @@ export interface Config {
     pages: PagesSelect<false> | PagesSelect<true>;
     categories: CategoriesSelect<false> | CategoriesSelect<true>;
     media: MediaSelect<false> | MediaSelect<true>;
+    'discount-codes': DiscountCodesSelect<false> | DiscountCodesSelect<true>;
     forms: FormsSelect<false> | FormsSelect<true>;
     'form-submissions': FormSubmissionsSelect<false> | FormSubmissionsSelect<true>;
     addresses: AddressesSelect<false> | AddressesSelect<true>;
@@ -277,6 +279,22 @@ export interface Order {
    */
   needsAttention?: boolean | null;
   attentionReason?: string | null;
+  /**
+   * Items total in cents, before discount and shipping.
+   */
+  subtotal?: number | null;
+  /**
+   * Discount code used on this, if any.
+   */
+  discountCode?: string | null;
+  /**
+   * Cents taken off the items total.
+   */
+  discountTotal?: number | null;
+  /**
+   * Shipping in cents.
+   */
+  shippingTotal?: number | null;
   accessToken?: string | null;
   updatedAt: string;
   createdAt: string;
@@ -951,6 +969,22 @@ export interface Transaction {
   cart?: (number | null) | Cart;
   amount?: number | null;
   currency?: 'USD' | null;
+  /**
+   * Items total in cents, before discount and shipping.
+   */
+  subtotal?: number | null;
+  /**
+   * Discount code applied at checkout, if any.
+   */
+  discountCode?: string | null;
+  /**
+   * Cents taken off the items total.
+   */
+  discountTotal?: number | null;
+  /**
+   * Shipping in cents.
+   */
+  shippingTotal?: number | null;
   updatedAt: string;
   createdAt: string;
 }
@@ -1039,6 +1073,36 @@ export interface Address {
   createdAt: string;
 }
 /**
+ * Codes are checked on the server at checkout. Percent codes are 1-99. Fixed codes are in cents.
+ *
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "discount-codes".
+ */
+export interface DiscountCode {
+  id: number;
+  /**
+   * Saved in uppercase. Customers can type it in any case.
+   */
+  code: string;
+  type: 'percent' | 'fixed';
+  /**
+   * Percent: 1 to 99. Fixed: cents, for example 500 for $5.00.
+   */
+  value: number;
+  active?: boolean | null;
+  /**
+   * Optional. The code stops working at this moment.
+   */
+  expiresAt?: string | null;
+  /**
+   * Optional. Leave empty for unlimited. Counted when an order is paid.
+   */
+  maxRedemptions?: number | null;
+  redemptions?: number | null;
+  updatedAt: string;
+  createdAt: string;
+}
+/**
  * This interface was referenced by `Config`'s JSON-Schema
  * via the `definition` "form-submissions".
  */
@@ -1094,6 +1158,10 @@ export interface PayloadLockedDocument {
     | ({
         relationTo: 'media';
         value: number | Media;
+      } | null)
+    | ({
+        relationTo: 'discount-codes';
+        value: number | DiscountCode;
       } | null)
     | ({
         relationTo: 'forms';
@@ -1407,6 +1475,21 @@ export interface MediaSelect<T extends boolean = true> {
   height?: T;
   focalX?: T;
   focalY?: T;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "discount-codes_select".
+ */
+export interface DiscountCodesSelect<T extends boolean = true> {
+  code?: T;
+  type?: T;
+  value?: T;
+  active?: T;
+  expiresAt?: T;
+  maxRedemptions?: T;
+  redemptions?: T;
+  updatedAt?: T;
+  createdAt?: T;
 }
 /**
  * This interface was referenced by `Config`'s JSON-Schema
@@ -1724,6 +1807,10 @@ export interface OrdersSelect<T extends boolean = true> {
   currency?: T;
   needsAttention?: T;
   attentionReason?: T;
+  subtotal?: T;
+  discountCode?: T;
+  discountTotal?: T;
+  shippingTotal?: T;
   accessToken?: T;
   updatedAt?: T;
   createdAt?: T;
@@ -1770,6 +1857,10 @@ export interface TransactionsSelect<T extends boolean = true> {
   cart?: T;
   amount?: T;
   currency?: T;
+  subtotal?: T;
+  discountCode?: T;
+  discountTotal?: T;
+  shippingTotal?: T;
   updatedAt?: T;
   createdAt?: T;
 }

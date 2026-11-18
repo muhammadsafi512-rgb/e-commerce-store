@@ -30,6 +30,32 @@ import { Product, Variant } from '@/payload-types'
 type GalleryItem = NonNullable<Product['gallery']>[number]
 type VariantOptionRef = NonNullable<Variant['options']>[number]
 
+/**
+ * Price breakdown returned by the server when a discount code was applied (cents).
+ * It is only for display: the amount charged is the one on the PaymentIntent.
+ */
+type Pricing = {
+  discountCode: null | string
+  discountTotal: number
+  subtotal: number
+  total: number
+}
+
+const readPricing = (value: unknown): null | Pricing => {
+  if (typeof value !== 'object' || value === null) return null
+  const p = value as Record<string, unknown>
+  const isCents = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0
+
+  if (!isCents(p.subtotal) || !isCents(p.discountTotal) || !isCents(p.total)) return null
+
+  return {
+    discountCode: typeof p.discountCode === 'string' ? p.discountCode : null,
+    discountTotal: p.discountTotal,
+    subtotal: p.subtotal,
+    total: p.total,
+  }
+}
+
 const apiKey = `${process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY}`
 const stripe = loadStripe(apiKey)
 
@@ -51,6 +77,7 @@ export const CheckoutPage: React.FC = () => {
   const [billingAddress, setBillingAddress] = useState<Partial<Address>>()
   const [billingAddressSameAsShipping, setBillingAddressSameAsShipping] = useState(true)
   const [isProcessingPayment, setProcessingPayment] = useState(false)
+  const [discountCode, setDiscountCode] = useState('')
 
   const cartIsEmpty = !cart || !cart.items || !cart.items.length
 
@@ -82,32 +109,62 @@ export const CheckoutPage: React.FC = () => {
 
   const initiatePaymentIntent = useCallback(
     async (paymentID: string) => {
+      // Clear the message from a previous try (for example a rejected discount code).
+      setError(null)
+
       try {
+        const code = discountCode.trim()
+
         const paymentData = (await initiatePayment(paymentID, {
           additionalData: {
             ...(email ? { customerEmail: email } : {}),
+            ...(code ? { discountCode: code } : {}),
             billingAddress,
             shippingAddress: billingAddressSameAsShipping ? billingAddress : shippingAddress,
           },
         })) as Record<string, unknown>
 
-        if (paymentData) {
+        if (paymentData?.['clientSecret']) {
           setPaymentData(paymentData)
+        } else {
+          // No client secret means no payment was created, so there is nothing to pay.
+          const errorMessage = 'An error occurred while initiating payment.'
+          setError(errorMessage)
+          toast.error(errorMessage)
         }
       } catch (error) {
-        const errorData = error instanceof Error ? JSON.parse(error.message) : {}
+        // The message is JSON from the server; anything else (for example a network
+        // failure) is not, so parsing must not be allowed to throw.
+        let errorData: { cause?: { code?: string } } = {}
+        try {
+          errorData = error instanceof Error ? JSON.parse(error.message) : {}
+        } catch {
+          errorData = {}
+        }
+
         let errorMessage = 'An error occurred while initiating payment.'
 
         if (errorData?.cause?.code === 'OutOfStock') {
           errorMessage = 'One or more items in your cart are out of stock.'
+        } else if (errorData?.cause?.code === 'DiscountCodeRejected') {
+          errorMessage = "This discount code isn't valid for this order."
         }
 
         setError(errorMessage)
         toast.error(errorMessage)
       }
     },
-    [billingAddress, billingAddressSameAsShipping, shippingAddress],
+    [
+      billingAddress,
+      billingAddressSameAsShipping,
+      discountCode,
+      email,
+      initiatePayment,
+      shippingAddress,
+    ],
   )
+
+  const pricing = readPricing(paymentData?.['pricing'])
 
   if (!stripe) return null
 
@@ -274,6 +331,20 @@ export const CheckoutPage: React.FC = () => {
         )}
 
         {!paymentData && (
+          <FormItem className="max-w-sm">
+            <Label htmlFor="discountCode">Discount code (optional)</Label>
+            <Input
+              autoComplete="off"
+              id="discountCode"
+              maxLength={32}
+              name="discountCode"
+              onChange={(e) => setDiscountCode(e.target.value)}
+              value={discountCode}
+            />
+          </FormItem>
+        )}
+
+        {!paymentData && (
           <Button
             className="self-start"
             disabled={!canGoToPayment}
@@ -433,9 +504,27 @@ export const CheckoutPage: React.FC = () => {
             return null
           })}
           <hr />
+          {pricing && (
+            <>
+              <div className="flex justify-between items-center gap-2">
+                <span>Subtotal</span>
+                <Price amount={pricing.subtotal} />
+              </div>
+              <div className="flex justify-between items-center gap-2">
+                <span>Discount{pricing.discountCode ? ` (${pricing.discountCode})` : ''}</span>
+                <span className="flex items-center">
+                  <span>-</span>
+                  <Price amount={pricing.discountTotal} />
+                </span>
+              </div>
+            </>
+          )}
           <div className="flex justify-between items-center gap-2">
             <span className="uppercase">Total</span>{' '}
-            <Price className="text-3xl font-medium" amount={cart.subtotal || 0} />
+            <Price
+              className="text-3xl font-medium"
+              amount={pricing ? pricing.total : cart.subtotal || 0}
+            />
           </div>
         </div>
       )}

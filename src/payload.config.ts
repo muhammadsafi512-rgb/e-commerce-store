@@ -1,4 +1,5 @@
 import { postgresAdapter } from '@payloadcms/db-postgres'
+import { DiscountCodes } from './collections/DiscountCodes'
 import {
   BoldFeature,
   EXPERIMENTAL_TableFeature,
@@ -38,7 +39,7 @@ export default buildConfig({
     },
     user: Users.slug,
   },
-  collections: [Users, Pages, Categories, Media],
+  collections: [Users, Pages, Categories, Media, DiscountCodes],
   db: postgresAdapter({
     pool: {
       connectionString: process.env.DATABASE_URL || '',
