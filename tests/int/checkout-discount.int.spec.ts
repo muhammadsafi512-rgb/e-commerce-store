@@ -1,4 +1,18 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+// Lets one test force a shipping failure that real, validated input cannot produce.
+const shippingFailure = vi.hoisted(() => ({ forced: false }))
+
+vi.mock('../../src/pricing/calculateShipping', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/pricing/calculateShipping')>()
+  return {
+    ...actual,
+    calculateShipping: (...args: Parameters<typeof actual.calculateShipping>) =>
+      shippingFailure.forced
+        ? ({ ok: false, reason: 'invalid_amount' } as const)
+        : actual.calculateShipping(...args),
+  }
+})
 
 import {
   DISCOUNT_REJECTED_CODE,
@@ -6,8 +20,18 @@ import {
   withCheckoutValidation,
 } from '../../src/payments/withCheckoutValidation'
 import { CheckoutValidationError } from '../../src/payments/validateCheckoutCart'
-import { PRICING_CONTEXT_KEY } from '../../src/pricing/pricingBreakdown'
+import { ShippingSettingsError } from '../../src/pricing/getShippingSettings'
+import { PRICING_CONTEXT_KEY, readPricingBreakdown } from '../../src/pricing/pricingBreakdown'
 
+afterEach(() => {
+  shippingFailure.forced = false
+})
+
+/** Shipping off: every order ships for 0 cents. Keeps the discount tests about discounts alone. */
+const NO_SHIPPING = { flatShippingCents: 0, freeShippingThresholdCents: 1 }
+
+/** The agreed defaults: $5.99 flat, free from $75.00 (on the subtotal after the discount). */
+const FLAT = { flatShippingCents: 599, freeShippingThresholdCents: 7500 }
 
 const code = (overrides: Record<string, unknown> = {}) => ({
   active: true,
@@ -32,7 +56,15 @@ const setup = ({
   discountDocs = [] as unknown[],
   findError,
   products = { '1': publishedProduct() } as Record<string, unknown>,
-}: { discountDocs?: unknown[]; findError?: Error; products?: Record<string, unknown> } = {}) => {
+  settings = NO_SHIPPING as unknown,
+  settingsError,
+}: {
+  discountDocs?: unknown[]
+  findError?: Error
+  products?: Record<string, unknown>
+  settings?: unknown
+  settingsError?: Error
+} = {}) => {
   const logger = { error: vi.fn(), warn: vi.fn() }
   const payload = {
     find: vi.fn(async (_args: unknown) => {
@@ -44,6 +76,10 @@ const setup = ({
       const doc = store[String(id)]
       if (!doc) throw Object.assign(new Error('Not found'), { status: 404 })
       return doc
+    }),
+    findGlobal: vi.fn(async (_args: unknown) => {
+      if (settingsError) throw settingsError
+      return settings
     }),
     logger,
   }
@@ -61,10 +97,17 @@ const setup = ({
 
 const run = async (
   ctx: ReturnType<typeof setup>,
-  { body, cartSubtotal = 5000 }: { body?: Record<string, unknown> | undefined; cartSubtotal?: number } = {},
+  {
+    body,
+    cartSubtotal = 5000,
+    req = { context: {}, data: body, payload: ctx.payload },
+  }: {
+    body?: Record<string, unknown> | undefined
+    cartSubtotal?: number
+    req?: Record<string, unknown>
+  } = {},
 ) => {
   const items = [{ product: 1, quantity: 1 }]
-  const req: Record<string, unknown> = { context: {}, data: body, payload: ctx.payload }
   const wrapped = withCheckoutValidation(ctx.adapter as never)
   const result = await wrapped.initiatePayment({
     customersSlug: 'users',
@@ -82,6 +125,10 @@ const run = async (
     | undefined
   return { items, passed, req, result }
 }
+
+/** The `pricing` field of the response. Typed here because the plugin's return type has no such field. */
+const pricingOf = (result: unknown) =>
+  (result as { pricing: Record<string, unknown> & { shippingTotal: number } }).pricing
 
 describe('withCheckoutValidation: discount codes', () => {
   it('charges the discounted total and saves the breakdown on the request', async () => {
@@ -143,6 +190,8 @@ describe('withCheckoutValidation: discount codes', () => {
       ['expired', [code({ expiresAt: '2000-01-01T00:00:00.000Z' })], 'expired'],
       ['used up', [code({ maxRedemptions: 3, redemptions: 3 })], 'exhausted'],
       ['total below the Stripe minimum', [code({ type: 'fixed', value: 4951 })], 'below_minimum'],
+      ['items taken to zero', [code({ type: 'fixed', value: 5000 })], 'items_total_zero'],
+      ['more than the whole cart', [code({ type: 'fixed', value: 9000 })], 'items_total_zero'],
       ['100 percent', [code({ value: 100 })], 'invalid_definition'],
       ['malformed record', [{ code: 'X', type: 'weird', value: 'ten' }], 'invalid_definition'],
     ]
@@ -232,20 +281,24 @@ describe('withCheckoutValidation: no discount code', () => {
     ['empty code', { discountCode: '' }],
     ['blank code', { discountCode: '   ' }],
     ['null code', { discountCode: null }],
-  ])('%s: charges the database total, looks nothing up, returns the adapter response untouched', async (_name, body) => {
+  ])('%s: charges the database total, looks no code up, returns the adapter response plus pricing', async (_name, body) => {
     const ctx = setup({ discountDocs: [code()] })
     const { passed, req, result } = await run(ctx, { body: body as Record<string, unknown> | undefined })
 
-    expect(ctx.payload.find).not.toHaveBeenCalled()
-    expect(passed?.data.cart.subtotal).toBe(5000)
-    expect(result).toBe(ctx.response)
-    expect((req.context as Record<string, unknown>)[PRICING_CONTEXT_KEY]).toEqual({
+    const expected = {
       discountCode: null,
       discountTotal: 0,
       shippingTotal: 0,
       subtotal: 5000,
       total: 5000,
-    })
+    }
+
+    expect(ctx.payload.find).not.toHaveBeenCalled()
+    expect(passed?.data.cart.subtotal).toBe(5000)
+    expect(result).toEqual({ ...ctx.response, pricing: expected })
+    expect((req.context as Record<string, unknown>)[PRICING_CONTEXT_KEY]).toEqual(expected)
+    // The adapter's own response object is not changed.
+    expect(ctx.response).not.toHaveProperty('pricing')
   })
 
   it('still corrects a stale cart subtotal and logs it', async () => {
@@ -283,5 +336,172 @@ describe('withCheckoutValidation: no discount code', () => {
       req,
     } as never)
     expect((req.context as Record<string, unknown>)[PRICING_CONTEXT_KEY]).toBeDefined()
+  })
+})
+
+describe('withCheckoutValidation: shipping', () => {
+  const priced = (cents: number) => ({ '1': publishedProduct({ priceInUSD: cents }) })
+
+  it('adds the flat rate under the threshold and charges the total', async () => {
+    const ctx = setup({ settings: FLAT })
+    const { passed, req, result } = await run(ctx)
+
+    const expected = { discountCode: null, discountTotal: 0, shippingTotal: 599, subtotal: 5000, total: 5599 }
+
+    expect(passed?.data.cart.subtotal).toBe(5599)
+    expect((req.context as Record<string, unknown>)[PRICING_CONTEXT_KEY]).toEqual(expected)
+    expect(result).toEqual({ ...ctx.response, pricing: expected })
+  })
+
+  it('is free at the threshold and charged one cent below it', async () => {
+    const at = setup({ products: priced(7500), settings: FLAT })
+    const atRun = await run(at, { cartSubtotal: 7500 })
+    expect(atRun.passed?.data.cart.subtotal).toBe(7500)
+    expect(pricingOf(atRun.result).shippingTotal).toBe(0)
+
+    const below = setup({ products: priced(7499), settings: FLAT })
+    const belowRun = await run(below, { cartSubtotal: 7499 })
+    expect(belowRun.passed?.data.cart.subtotal).toBe(7499 + 599)
+    expect(pricingOf(belowRun.result).shippingTotal).toBe(599)
+  })
+
+  it('uses the admin-saved numbers, not built-in ones', async () => {
+    const ctx = setup({ settings: { flatShippingCents: 1234, freeShippingThresholdCents: 99_999 } })
+    const { passed } = await run(ctx)
+    expect(passed?.data.cart.subtotal).toBe(5000 + 1234)
+  })
+
+  it('decides free shipping on the subtotal AFTER the discount', async () => {
+    // 8000 is over the threshold, but 10% off leaves 7200, which is not: shipping is charged.
+    const under = setup({ discountDocs: [code()], products: priced(8000), settings: FLAT })
+    const underRun = await run(under, { body: { discountCode: 'SUMMER10' }, cartSubtotal: 8000 })
+    expect(underRun.passed?.data.cart.subtotal).toBe(7200 + 599)
+    expect(pricingOf(underRun.result)).toEqual({
+      discountCode: 'SUMMER10',
+      discountTotal: 800,
+      shippingTotal: 599,
+      subtotal: 8000,
+      total: 7799,
+    })
+
+    // 8000 - 500 = 7500, exactly the threshold: free.
+    const exact = setup({ discountDocs: [code({ type: 'fixed', value: 500 })], products: priced(8000), settings: FLAT })
+    const exactRun = await run(exact, { body: { discountCode: 'SUMMER10' }, cartSubtotal: 8000 })
+    expect(exactRun.passed?.data.cart.subtotal).toBe(7500)
+    expect(pricingOf(exactRun.result).shippingTotal).toBe(0)
+  })
+
+  it('rejects a code that takes the items to zero, even though shipping would cover the minimum', async () => {
+    const ctx = setup({ discountDocs: [code({ type: 'fixed', value: 5000 })], settings: FLAT })
+    const { passed, req, result } = await run(ctx, { body: { discountCode: 'SUMMER10' } })
+
+    expect(ctx.adapter.initiatePayment).not.toHaveBeenCalled()
+    expect(passed).toBeUndefined()
+    expect((req.context as Record<string, unknown>)[PRICING_CONTEXT_KEY]).toBeUndefined()
+    expect(ctx.logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ msg: 'Discount code rejected: items_total_zero' }),
+    )
+    expect(JSON.parse((result as unknown as { error: string }).error).cause.code).toBe(DISCOUNT_REJECTED_CODE)
+  })
+
+  it('still accepts a code that leaves one cent of items', async () => {
+    const ctx = setup({ discountDocs: [code({ type: 'fixed', value: 4999 })], settings: FLAT })
+    const { passed } = await run(ctx, { body: { discountCode: 'SUMMER10' } })
+    expect(passed?.data.cart.subtotal).toBe(1 + 599)
+  })
+
+  it('ignores shipping amounts and settings sent by the browser', async () => {
+    const ctx = setup({ settings: FLAT })
+    const { passed } = await run(ctx, {
+      body: { flatShippingCents: 0, freeShippingThresholdCents: 1, shippingTotal: 0, total: 1 },
+    })
+    expect(passed?.data.cart.subtotal).toBe(5599)
+  })
+
+  it('saves a breakdown the transactions hook will accept, and charges exactly its total', async () => {
+    const ctx = setup({ discountDocs: [code()], settings: FLAT })
+    const { passed, req, result } = await run(ctx, { body: { discountCode: 'SUMMER10' } })
+
+    const read = readPricingBreakdown(req.context)
+    expect(read).not.toBeNull()
+    expect(read).toEqual(pricingOf(result))
+    expect(passed?.data.cart.subtotal).toBe(read?.total)
+    expect(read?.total).toBe(read!.subtotal - read!.discountTotal + read!.shippingTotal)
+  })
+
+  it('reads the settings once per checkout, with the Local API', async () => {
+    const ctx = setup({ discountDocs: [code()], settings: FLAT })
+    await run(ctx, { body: { discountCode: 'SUMMER10' } })
+
+    expect(ctx.payload.findGlobal).toHaveBeenCalledTimes(1)
+    expect(ctx.payload.findGlobal).toHaveBeenCalledWith({
+      depth: 0,
+      overrideAccess: true,
+      slug: 'site-settings',
+    })
+  })
+
+  it('never reads the settings for a cart that is blocked', async () => {
+    const ctx = setup({ products: { '1': publishedProduct({ inventory: 0 }) }, settings: FLAT })
+    await expect(run(ctx)).rejects.toBeInstanceOf(CheckoutValidationError)
+    expect(ctx.payload.findGlobal).not.toHaveBeenCalled()
+  })
+
+  describe('missing or invalid settings block checkout', () => {
+    it.each([
+      ['never saved', {}],
+      ['null', null],
+      ['a fractional flat rate', { flatShippingCents: 5.99, freeShippingThresholdCents: 7500 }],
+      ['a zero threshold', { flatShippingCents: 599, freeShippingThresholdCents: 0 }],
+      ['text amounts', { flatShippingCents: '599', freeShippingThresholdCents: '7500' }],
+    ])('%s: throws, charges nothing, creates nothing', async (_name, settings) => {
+      const ctx = setup({ discountDocs: [code()], settings })
+      const req: Record<string, unknown> = {
+        context: {},
+        data: { discountCode: 'SUMMER10' },
+        payload: ctx.payload,
+      }
+
+      await expect(run(ctx, { req })).rejects.toBeInstanceOf(ShippingSettingsError)
+
+      expect(ctx.adapter.initiatePayment).not.toHaveBeenCalled()
+      // The code is not even looked up: nothing is guessed while the settings are broken.
+      expect(ctx.payload.find).not.toHaveBeenCalled()
+      expect((req.context as Record<string, unknown>)[PRICING_CONTEXT_KEY]).toBeUndefined()
+      expect(ctx.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cartID: 42,
+          msg: expect.stringContaining('Checkout blocked: Shipping settings are missing or invalid'),
+        }),
+      )
+    })
+
+    it('rethrows a database failure as it is, and does not call it a settings problem', async () => {
+      const boom = new Error('connection terminated')
+      const ctx = setup({ settingsError: boom })
+
+      const error = await run(ctx).catch((e: unknown) => e)
+
+      expect(error).toBe(boom)
+      expect(error).not.toBeInstanceOf(ShippingSettingsError)
+      expect(ctx.adapter.initiatePayment).not.toHaveBeenCalled()
+      expect(ctx.logger.error).not.toHaveBeenCalled()
+    })
+
+    it('blocks checkout if shipping cannot be calculated, without a code', async () => {
+      const ctx = setup({ settings: FLAT })
+      const req: Record<string, unknown> = { context: {}, data: {}, payload: ctx.payload }
+      shippingFailure.forced = true
+
+      await expect(run(ctx, { req })).rejects.toThrow('Shipping could not be calculated.')
+
+      expect(ctx.adapter.initiatePayment).not.toHaveBeenCalled()
+      expect((req.context as Record<string, unknown>)[PRICING_CONTEXT_KEY]).toBeUndefined()
+      expect(ctx.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          msg: 'Checkout blocked: shipping could not be calculated (invalid_amount)',
+        }),
+      )
+    })
   })
 })

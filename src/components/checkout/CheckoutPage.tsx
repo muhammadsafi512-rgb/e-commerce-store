@@ -31,12 +31,14 @@ type GalleryItem = NonNullable<Product['gallery']>[number]
 type VariantOptionRef = NonNullable<Variant['options']>[number]
 
 /**
- * Price breakdown returned by the server when a discount code was applied (cents).
+ * Price breakdown returned by the server when payment is initiated (cents): items,
+ * discount (when a code was used), shipping and the total.
  * It is only for display: the amount charged is the one on the PaymentIntent.
  */
 type Pricing = {
   discountCode: null | string
   discountTotal: number
+  shippingTotal: number
   subtotal: number
   total: number
 }
@@ -46,11 +48,19 @@ const readPricing = (value: unknown): null | Pricing => {
   const p = value as Record<string, unknown>
   const isCents = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0
 
-  if (!isCents(p.subtotal) || !isCents(p.discountTotal) || !isCents(p.total)) return null
+  if (
+    !isCents(p.subtotal) ||
+    !isCents(p.discountTotal) ||
+    !isCents(p.shippingTotal) ||
+    !isCents(p.total)
+  ) {
+    return null
+  }
 
   return {
     discountCode: typeof p.discountCode === 'string' ? p.discountCode : null,
     discountTotal: p.discountTotal,
+    shippingTotal: p.shippingTotal,
     subtotal: p.subtotal,
     total: p.total,
   }
@@ -504,20 +514,32 @@ export const CheckoutPage: React.FC = () => {
             return null
           })}
           <hr />
-          {pricing && (
+          {pricing ? (
             <>
               <div className="flex justify-between items-center gap-2">
                 <span>Subtotal</span>
                 <Price amount={pricing.subtotal} />
               </div>
+              {pricing.discountCode && (
+                <div className="flex justify-between items-center gap-2">
+                  <span>Discount ({pricing.discountCode})</span>
+                  <span className="flex items-center">
+                    <span>-</span>
+                    <Price amount={pricing.discountTotal} />
+                  </span>
+                </div>
+              )}
               <div className="flex justify-between items-center gap-2">
-                <span>Discount{pricing.discountCode ? ` (${pricing.discountCode})` : ''}</span>
-                <span className="flex items-center">
-                  <span>-</span>
-                  <Price amount={pricing.discountTotal} />
-                </span>
+                <span>Shipping</span>
+                {pricing.shippingTotal === 0 ? (
+                  <span>Free</span>
+                ) : (
+                  <Price amount={pricing.shippingTotal} />
+                )}
               </div>
             </>
+          ) : (
+            <p className="text-sm text-primary/50">Shipping is added when you go to payment.</p>
           )}
           <div className="flex justify-between items-center gap-2">
             <span className="uppercase">Total</span>{' '}

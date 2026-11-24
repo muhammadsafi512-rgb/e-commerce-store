@@ -5,16 +5,23 @@ import { withCheckoutValidation } from '@/payments/withCheckoutValidation'
 
 type Docs = Record<string, Record<string, unknown>>
 
-/** Fake Payload: `findByID` serves docs by `collection:id`; a missing doc throws a 404 like Payload. */
+/** Shipping off (0 cents for every order), so these tests stay about stock, price and the subtotal. */
+const NO_SHIPPING = { flatShippingCents: 0, freeShippingThresholdCents: 1 }
+
+/**
+ * Fake Payload: `findByID` serves docs by `collection:id`; a missing doc throws a 404 like Payload.
+ * `findGlobal` serves the `site-settings` global that the wrapper reads for shipping.
+ */
 const makePayload = (docs: Docs) => {
   const findByID = vi.fn(async ({ collection, id }: { collection: string; id: string | number }) => {
     const doc = docs[`${collection}:${id}`]
     if (!doc) throw Object.assign(new Error('Not Found'), { status: 404 })
     return doc
   })
+  const findGlobal = vi.fn(async (_args: unknown) => NO_SHIPPING)
   const logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn() }
 
-  return { payload: { findByID, logger } as never, findByID, logger }
+  return { payload: { findByID, findGlobal, logger } as never, findByID, findGlobal, logger }
 }
 
 const baseDocs = (): Docs => ({
@@ -242,7 +249,12 @@ describe('withCheckoutValidation', () => {
     const { adapter, initiatePayment } = makeAdapter()
     const { result, logger } = call(withCheckoutValidation(adapter), baseDocs())
 
-    expect(await result).toEqual({ message: 'ok', clientSecret: 'cs_1' })
+    // The adapter's response, plus the price breakdown the checkout page shows (step 9).
+    expect(await result).toEqual({
+      message: 'ok',
+      clientSecret: 'cs_1',
+      pricing: { discountCode: null, discountTotal: 0, shippingTotal: 0, subtotal: 6400, total: 6400 },
+    })
 
     const passed: any = (initiatePayment.mock.calls[0] as any[])[0]
     expect(passed.data.cart.subtotal).toBe(6400)

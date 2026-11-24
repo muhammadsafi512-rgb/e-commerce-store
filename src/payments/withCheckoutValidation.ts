@@ -1,7 +1,10 @@
 import type { PaymentAdapter } from '@payloadcms/plugin-ecommerce/types'
 
+import { calculateShipping } from '@/pricing/calculateShipping'
 import { evaluateDiscountCode } from '../pricing/evaluateDiscountCode'
 import { findDiscountCode } from '../pricing/findDiscountCode'
+import { ShippingSettingsError, getShippingSettings } from '@/pricing/getShippingSettings'
+import { ShippingSettings } from '@/pricing/shippingSettings'
 import { PRICING_CONTEXT_KEY, buildPricingBreakdown } from '../pricing/pricingBreakdown'
 import { normalizeDiscountCode } from '../utilities/normalizeDiscountCode'
 import { CheckoutValidationError, validateCheckoutCart } from './validateCheckoutCart'
@@ -16,8 +19,6 @@ export const DISCOUNT_REJECTED_CODE = 'DiscountCodeRejected'
  */
 export const DISCOUNT_REJECTED_MESSAGE = "This discount code isn't valid for this order."
 
-/** Shipping is added in step 9. Until then every order ships for 0 cents. */
-const SHIPPING_TOTAL_CENTS = 0
 
 /**
  * A rejected code is answered with HTTP 200 and an `error` field instead of a throw.
@@ -37,8 +38,8 @@ const discountRejected = () => ({
 /**
  * Wraps a payment adapter so `initiatePayment` first validates the cart against the
  * database (stock, price, published status, variant ownership), applies a discount code
- * if the customer typed one, and charges the freshly computed total instead of the
- * cart's stored subtotal.
+ * if the customer typed one, adds shipping, and charges the freshly computed total instead
+ * of the cart's stored subtotal.
  *
  * Only `initiatePayment` is replaced. `confirmOrder`, webhook endpoints, the transactions
  * group, label and name are the original adapter's, so settlement is untouched.
@@ -54,10 +55,21 @@ const discountRejected = () => ({
  * - The breakdown goes into `req.context` so the `transactions` create hook can save
  *   it in the same write that creates the transaction.
  *
- * When cart validation fails the error is logged and re-thrown. The plugin's endpoint turns
- * it into a generic 500 "Error initiating payment." (decision #21), and no PaymentIntent or
- * transaction is created.
+ * Shipping (decision #41):
+ * - Flat rate, free when the subtotal AFTER the discount reaches the threshold. Both come
+ *   from the `site-settings` global, read on the server for every checkout. Nothing about
+ *   shipping is taken from the browser.
+ * - If the settings are missing or invalid, checkout is blocked (the error is thrown, as
+ *   for a blocked cart): nothing is charged and no transaction exists. A shipping price is
+ *   never guessed.
+ * - The breakdown and the response's `pricing` are returned on every checkout, with or
+ *   without a code, so the page can show shipping.
+ *
+ * When cart validation or the settings fail the error is logged and re-thrown. The plugin's
+ * endpoint turns it into a generic 500 "Error initiating payment." (decision #21), and no
+ * PaymentIntent or transaction is created.
  */
+
 export const withCheckoutValidation = (adapter: PaymentAdapter): PaymentAdapter => ({
   ...adapter,
   initiatePayment: async (args) => {
@@ -91,6 +103,23 @@ export const withCheckoutValidation = (adapter: PaymentAdapter): PaymentAdapter 
       })
     }
 
+    let shippingSettings: ShippingSettings
+
+    try {
+      shippingSettings = await getShippingSettings(req.payload)
+    } catch (error) {
+      //Missing or invalid settings need an admin to fix them, so this is an error, not a 
+      //warning. A database failure is rethrown as it is.
+      if(error instanceof ShippingSettingsError) {
+        req.payload.logger.error({
+          cartID: data.cart.id,
+          msg: `Checkout blocked: ${error.message}`,
+        })
+      }
+
+      throw error
+    }
+
     const rawCode: unknown = req.data?.discountCode
     const typedCode = normalizeDiscountCode(rawCode)
 
@@ -111,15 +140,18 @@ export const withCheckoutValidation = (adapter: PaymentAdapter): PaymentAdapter 
       return discountRejected()
     }
 
-    let discount: { code: string; discountTotal: number } | null = null
+    let discountCode: null | string = null
+    let discountTotal = 0
+    let shippingTotal: number
 
     if (typedCode !== null) {
       // Real failures (for example the database being down) are thrown, not reported
       // as "code not found". Nothing has been charged yet, so a throw is safe.
       const record = await findDiscountCode(req.payload, rawCode)
 
+      //Shipping is decided inside the evaluation, on the subtotal after the discount.
       const result = record
-        ? evaluateDiscountCode({ record, shippingTotal: SHIPPING_TOTAL_CENTS, subtotal })
+        ? evaluateDiscountCode({ record, shippingSettings, subtotal })
         : ({ ok: false, reason: 'not_found' } as const)
 
       if (!result.ok) {
@@ -132,13 +164,30 @@ export const withCheckoutValidation = (adapter: PaymentAdapter): PaymentAdapter 
         return discountRejected()
       }
 
-      discount = { code: result.code, discountTotal: result.discountTotal }
+      discountCode = result.code
+      discountTotal = result.discountTotal
+      shippingTotal = result.shippingTotal
+    } else {
+      const shipping = calculateShipping({ discountedSubtotal: subtotal, settings: shippingSettings })
+
+      //Cannot happpen with a validated cart and validated settings. Blocking is 
+      //safe answer if it ever does: nothing has been charged.
+      if(!shipping.ok) {
+        req.payload.logger.error({
+          cartID: data.cart.id,
+          msg: `Checkout blocked: shipping could not be calculated (${shipping.reason})`,
+        })
+
+        throw new Error('Shipping could not be calculated.')
+      }
+      
+      shippingTotal = shipping.shippingTotal
     }
 
     const breakdown = buildPricingBreakdown({
-      discountCode: discount?.code ?? null,
-      discountTotal: discount?.discountTotal ?? 0,
-      shippingTotal: SHIPPING_TOTAL_CENTS,
+      discountCode,
+      discountTotal,
+      shippingTotal,
       subtotal,
     })
 
@@ -150,8 +199,7 @@ export const withCheckoutValidation = (adapter: PaymentAdapter): PaymentAdapter 
       data: { ...data, cart: { ...data.cart, subtotal: breakdown.total } },
     })
 
-    // The page shows the breakdown only when a code was applied. Without a code the
-    // adapter's response is returned exactly as it was.
-    return discount ? { ...response, pricing: breakdown } : response
+    // The page shows shipping (and the dicount, when there is one) from this.
+    return { ...response, pricing: breakdown } 
   },
 })
